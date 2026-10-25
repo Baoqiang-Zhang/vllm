@@ -660,20 +660,17 @@ class BlockPool:
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
-        # In order to only iterate the list once, we duplicated code a bit
-        if self.enable_caching:
-            for block in ret:
+        # Bind to local variables to avoid repeated attribute lookups and
+        # branch evaluations inside the hot loop.
+        enable_caching = self.enable_caching
+        metrics = self.metrics_collector
+        for block in ret:
+            if enable_caching:
                 self._maybe_evict_cached_block(block)
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                if self.metrics_collector:
-                    self.metrics_collector.on_block_allocated(block)
-        else:
-            for block in ret:
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                if self.metrics_collector:
-                    self.metrics_collector.on_block_allocated(block)
+            assert block.ref_cnt == 0
+            block.ref_cnt = 1
+            if metrics:
+                metrics.on_block_allocated(block)
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:

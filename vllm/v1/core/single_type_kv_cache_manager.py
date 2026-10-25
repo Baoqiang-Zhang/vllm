@@ -824,9 +824,11 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         blocks = self.req_to_blocks[running_request_id]
+        # Cache len() so the dict size is not re-evaluated on every iteration.
+        target_ref_cnt = len(self.req_to_blocks)
         num_common_blocks = 0
         for block in blocks:
-            if block.ref_cnt == len(self.req_to_blocks):
+            if block.ref_cnt == target_ref_cnt:
                 num_common_blocks += 1
             else:
                 break
@@ -936,11 +938,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             kv_cache_spec.sliding_window, kv_cache_spec.block_size, drop_eagle_block
         )
 
-        # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
-        # optimize the time complexity from O(max_num_blocks) to
-        # O(max_num_blocks / sliding_window_contiguous_blocks +
-        # sliding_window_contiguous_blocks),
-        # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [block_pool.null_block] * max_num_blocks
@@ -950,7 +947,12 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         num_contiguous_blocks = 0
         match_found = False
         # Search from right to left and early stop when a match is found.
-        for i in range(max_num_blocks - 1, -1, -1):
+        # On cache miss, skip (sliding_window_contiguous_blocks - 1) positions
+        # because those blocks can never form a complete contiguous window run,
+        # reducing the worst-case time complexity from O(max_num_blocks) to
+        # O(max_num_blocks / W + W) where W = sliding_window_contiguous_blocks.
+        i = max_num_blocks - 1
+        while i >= 0:
             if cached_block := block_pool.get_cached_block(
                 block_hashes[i], kv_cache_group_ids
             ):
@@ -959,6 +961,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 if num_contiguous_blocks == 0 and block_size != alignment_tokens:
                     post_pop_blocks = i if drop_eagle_block else i + 1
                     if (post_pop_blocks * block_size) % alignment_tokens != 0:
+                        i -= 1
                         continue
                 # Add the cached block to the computed blocks.
                 for computed, cached in zip(computed_blocks, cached_block):
@@ -972,7 +975,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                         del computed[i + num_contiguous_blocks :]
                     match_found = True
                     break
+                i -= 1
             else:
+                # Cache miss: the current run is broken, so the preceding
+                # (sliding_window_contiguous_blocks - 1) blocks cannot
+                # contribute to a fresh window run either.  Jump over them.
+                skip = max(num_contiguous_blocks, sliding_window_contiguous_blocks - 1)
+                i -= skip + 1
                 num_contiguous_blocks = 0
         if not match_found:
             # The first `num_contiguous_blocks` is a cache hit even if

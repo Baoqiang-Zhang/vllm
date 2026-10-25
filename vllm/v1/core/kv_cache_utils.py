@@ -330,21 +330,22 @@ class FreeKVCacheBlockQueue:
         self.num_free_blocks -= n
 
         curr_block = self.fake_free_list_head.next_free_block
-        # Pop n blocks from the head of the list
-        ret = []
+        # Pop n blocks from the head of the list, fetching next_free_block
+        # before clearing the pointers so we avoid an extra attribute lookup
+        # at the bottom of each iteration.
+        ret: list[KVCacheBlock] = []
         for _ in range(n):
             assert curr_block is not None
+            next_block = curr_block.next_free_block
+            curr_block.prev_free_block = None
+            curr_block.next_free_block = None
             ret.append(curr_block)
-            last_block = curr_block
-            curr_block = curr_block.next_free_block
-            # Reset prev_free_block and next_free_block of all popped blocks
-            last_block.prev_free_block = None
-            last_block.next_free_block = None
+            curr_block = next_block
 
+        # curr_block is now the (n+1)-th block (or fake_tail).
+        # Reconnect fake_head to the new front in a single operation.
+        self.fake_free_list_head.next_free_block = curr_block
         if curr_block is not None:
-            # The queue is not empty, connect the fake head to
-            # the new first block.
-            self.fake_free_list_head.next_free_block = curr_block
             curr_block.prev_free_block = self.fake_free_list_head
         return ret
 
